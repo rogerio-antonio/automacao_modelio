@@ -1,0 +1,387 @@
+# Script Jython para criar classes UML no Modelio
+# Autor: Augment
+# Descrição: Script simplificado para criar classes com atributos e métodos
+
+# Importações básicas
+from org.modelio.api.modelio import Modelio
+from org.modelio.metamodel.uml.statik import Class, Package, NameSpace
+from org.modelio.metamodel.mda import ModuleComponent
+
+def debug_object(obj, name="Objeto"):
+    """Imprime informações de debug sobre um objeto"""
+    print(name + ": " + str(obj))
+    print("Tipo: " + str(type(obj)))
+    if hasattr(obj, '__class__'):
+        print("Classe: " + obj.__class__.__name__)
+    else:
+        print("Classe: N/A")
+    if hasattr(obj, "getMClass"):
+        print("MClass: " + obj.getMClass().getName())
+    
+    # Lista métodos disponíveis
+    methods = [method for method in dir(obj) if not method.startswith("_")]
+    print("Métodos disponíveis: " + str(methods[:10]) + "...")
+    print("---")
+
+def get_owned_elements(element):
+    """Obtém os elementos filhos de um elemento, independente do tipo"""
+    if hasattr(element, "getOwnedElement"):
+        return element.getOwnedElement()
+    elif hasattr(element, "getOwned"):
+        return element.getOwned()
+    elif hasattr(element, "getCompositionChildren"):
+        return element.getCompositionChildren()
+    elif hasattr(element, "getOwnedBehavior"):
+        return element.getOwnedBehavior()
+    else:
+        print("Aviso: Não foi possível encontrar método para obter elementos filhos")
+        return []
+
+def findModelPackage():
+    """Encontra um pacote adequado para criar elementos UML"""
+    session = Modelio.getInstance().getModelingSession()
+    
+    # Obtém a raiz do modelo
+    roots = session.getModel().getModelRoots()
+    if roots.size() == 0:
+        print("Erro: Nenhuma raiz de modelo encontrada")
+        return None
+    
+    # Procura por um pacote adequado
+    for i in range(roots.size()):
+        root = roots.get(i)
+        debug_object(root, "Raiz " + str(i))
+        
+        # Procura por pacotes dentro da raiz
+        children = get_owned_elements(root)
+        for element in children:
+            debug_object(element, "Elemento na raiz")
+            
+            # Verifica se é um pacote ou namespace
+            if isinstance(element, NameSpace):
+                print("Encontrado NameSpace adequado: " + element.getName())
+                return element
+    
+    print("Aviso: Nenhum NameSpace encontrado nas raízes. Tentando criar um novo pacote.")
+    
+    # Se não encontrou, tenta criar um novo pacote
+    try:
+        transaction = session.createTransaction("Create model package")
+        modelFactory = session.getModel()
+        
+        # Tenta encontrar um ModuleComponent para usar como owner
+        moduleComponent = None
+        for i in range(roots.size()):
+            root = roots.get(i)
+            if isinstance(root, ModuleComponent):
+                moduleComponent = root
+                break
+        
+        if moduleComponent is None:
+            print("Erro: Não foi possível encontrar um ModuleComponent para criar o pacote")
+            transaction.rollback()
+            return None
+        
+        # Cria um novo pacote
+        newPackage = modelFactory.createPackage("Model", moduleComponent)
+        transaction.commit()
+        print("Criado novo pacote Model")
+        return newPackage
+    except Exception as e:
+        if 'transaction' in locals():
+            transaction.rollback()
+        print("Erro ao criar pacote Model: " + str(e))
+        import traceback
+        traceback.print_exc()
+        return None
+
+def createClass(name, packagePath, attributes=None, methods=None):
+    """Cria uma classe UML no pacote especificado"""
+    session = Modelio.getInstance().getModelingSession()
+    transaction = session.createTransaction("Create class " + name)
+    
+    try:
+        # Encontra um pacote adequado
+        package = None
+        if packagePath == "":
+            package = findModelPackage()
+        else:
+            package = findOrCreatePackage(packagePath)
+            
+        if package is None:
+            print("Erro: Não foi possível encontrar/criar um pacote adequado")
+            transaction.rollback()
+            return None
+        
+        # Imprime informações para debug
+        debug_object(package, "Pacote encontrado")
+        
+        # Verifica se o pacote é uma instância de NameSpace
+        if not isinstance(package, NameSpace):
+            print("Erro: O pacote não é uma instância de NameSpace")
+            transaction.rollback()
+            return None
+        
+        # Cria a classe usando o método createClass
+        modelFactory = session.getModel()
+        newClass = modelFactory.createClass(name, package)
+        
+        print("Classe criada: " + name)
+        
+        # Adiciona atributos
+        if attributes:
+            for attr in attributes:
+                attr_name, type_name, visibility = attr
+                addAttribute(newClass, attr_name, type_name, visibility)
+        
+        # Adiciona métodos
+        if methods:
+            for method in methods:
+                method_name, return_type, params, visibility = method
+                addOperation(newClass, method_name, return_type, params, visibility)
+        
+        transaction.commit()
+        return newClass
+    except Exception as e:
+        transaction.rollback()
+        print("Erro ao criar classe: " + str(e))
+        import traceback
+        traceback.print_exc()
+        return None
+
+def findOrCreatePackage(path):
+    """Encontra ou cria um pacote pelo caminho"""
+    session = Modelio.getInstance().getModelingSession()
+    modelFactory = session.getModel()
+    
+    # Encontra um pacote base adequado
+    basePackage = findModelPackage()
+    if basePackage is None:
+        print("Erro: Não foi possível encontrar um pacote base adequado")
+        return None
+    
+    if path == "":
+        return basePackage
+    
+    # Divide o caminho em partes
+    parts = path.split("/")
+    current = basePackage
+    
+    # Percorre o caminho
+    for part in parts:
+        found = False
+        
+        # Procura pelo pacote atual
+        children = get_owned_elements(current)
+        for element in children:
+            if element.getName() == part and isinstance(element, Package):
+                current = element
+                found = True
+                break
+        
+        # Se não encontrou, cria o pacote
+        if not found:
+            transaction = session.createTransaction("Create package " + part)
+            try:
+                # Cria um novo pacote
+                newPackage = modelFactory.createPackage(part, current)
+                current = newPackage
+                transaction.commit()
+            except Exception as e:
+                transaction.rollback()
+                print("Erro ao criar pacote: " + str(e))
+                import traceback
+                traceback.print_exc()
+                return None
+    
+    return current
+
+def addAttribute(cls, name, type_name, visibility="public"):
+    """Adiciona um atributo à classe"""
+    session = Modelio.getInstance().getModelingSession()
+    modelFactory = session.getModel()
+    transaction = session.createTransaction("Create attribute " + name)
+    
+    try:
+        # Obtém o tipo de dados
+        dataType = findDataType(type_name)
+        if dataType is None:
+            print("Aviso: Tipo de dados não encontrado: " + type_name)
+            # Usa String como tipo padrão
+            dataType = session.getModel().getUmlTypes().getSTRING()
+        
+        # Cria o atributo
+        attribute = modelFactory.createAttribute(name, dataType, cls)
+        
+        # Define a visibilidade
+        if visibility == "private":
+            attribute.setVisibility("Private")
+        elif visibility == "protected":
+            attribute.setVisibility("Protected")
+        else:
+            attribute.setVisibility("Public")
+        
+        transaction.commit()
+        return attribute
+    except Exception as e:
+        transaction.rollback()
+        print("Erro ao criar atributo: " + str(e))
+        import traceback
+        traceback.print_exc()
+        return None
+
+def addOperation(cls, name, return_type, params=None, visibility="public"):
+    """Adiciona uma operação/método à classe"""
+    session = Modelio.getInstance().getModelingSession()
+    modelFactory = session.getModel()
+    transaction = session.createTransaction("Create operation " + name)
+    
+    try:
+        # Cria a operação
+        operation = modelFactory.createOperation(name, cls)
+        
+        # Define a visibilidade
+        if visibility == "private":
+            operation.setVisibility("Private")
+        elif visibility == "protected":
+            operation.setVisibility("Protected")
+        else:
+            operation.setVisibility("Public")
+        
+        # Define o tipo de retorno
+        if return_type and return_type != "void":
+            returnType = findDataType(return_type)
+            if returnType:
+                modelFactory.createReturn(operation, returnType)
+        
+        # Adiciona parâmetros
+        if params:
+            for param_name, param_type in params:
+                dataType = findDataType(param_type)
+                if dataType is None:
+                    print("Aviso: Tipo de dados não encontrado para parâmetro: " + param_type)
+                    # Usa String como tipo padrão
+                    dataType = session.getModel().getUmlTypes().getSTRING()
+                modelFactory.createParameter(param_name, dataType, operation)
+        
+        transaction.commit()
+        return operation
+    except Exception as e:
+        transaction.rollback()
+        print("Erro ao criar operação: " + str(e))
+        import traceback
+        traceback.print_exc()
+        return None
+
+def findDataType(type_name):
+    """Encontra um tipo de dados"""
+    session = Modelio.getInstance().getModelingSession()
+    
+    # Tipos primitivos comuns
+    if type_name.lower() in ["int", "integer"]:
+        return session.getModel().getUmlTypes().getINTEGER()
+    elif type_name.lower() in ["string", "str"]:
+        return session.getModel().getUmlTypes().getSTRING()
+    elif type_name.lower() in ["bool", "boolean"]:
+        return session.getModel().getUmlTypes().getBOOLEAN()
+    elif type_name.lower() in ["float", "double", "real"]:
+        return session.getModel().getUmlTypes().getFLOAT()
+    
+    # Procura por classes existentes no modelo
+    for root in session.getModel().getModelRoots():
+        found = findClassByName(root, type_name)
+        if found:
+            return found
+    
+    return None
+
+def findClassByName(element, name):
+    """Procura recursivamente por uma classe pelo nome"""
+    if element.getMClass().getName() == "Class" and element.getName() == name:
+        return element
+    
+    children = get_owned_elements(element)
+    for child in children:
+        found = findClassByName(child, name)
+        if found:
+            return found
+    
+    return None
+
+def createGeneralization(subClass, superClass):
+    """Cria uma relação de herança entre duas classes"""
+    session = Modelio.getInstance().getModelingSession()
+    modelFactory = session.getModel()
+    transaction = session.createTransaction("Create generalization")
+    
+    try:
+        generalization = modelFactory.createGeneralization(subClass, superClass)
+        
+        print("Herança criada: " + subClass.getName() + " herda de " + superClass.getName())
+        transaction.commit()
+        return generalization
+    except Exception as e:
+        transaction.rollback()
+        print("Erro ao criar herança: " + str(e))
+        import traceback
+        traceback.print_exc()
+        return None
+
+# Exemplo de uso
+if __name__ == "__main__":
+    # Imprime informações sobre o ambiente
+    print("Iniciando script...")
+    session = Modelio.getInstance().getModelingSession()
+    print("Sessão obtida")
+    
+    # Imprime informações sobre as raízes do modelo
+    roots = session.getModel().getModelRoots()
+    print("Número de raízes: " + str(roots.size()))
+    for i in range(roots.size()):
+        root = roots.get(i)
+        debug_object(root, "Raiz " + str(i))
+    
+    # Criar uma classe Pessoa no pacote raiz
+    atributos = [
+        ("id", "Integer", "private"),
+        ("nome", "String", "private"),
+        ("idade", "Integer", "private")
+    ]
+    
+    metodos = [
+        ("getId", "Integer", [], "public"),
+        ("setId", "void", [("id", "Integer")], "public"),
+        ("getNome", "String", [], "public"),
+        ("setNome", "void", [("nome", "String")], "public"),
+        ("getIdade", "Integer", [], "public"),
+        ("setIdade", "void", [("idade", "Integer")], "public")
+    ]
+    
+    # Tenta criar no pacote raiz primeiro
+    print("Criando classe Pessoa...")
+    pessoa = createClass("Pessoa", "", atributos, metodos)
+    
+    # Criar uma classe Estudante que herda de Pessoa
+    if pessoa:
+        atributos_estudante = [
+            ("matricula", "String", "private"),
+            ("curso", "String", "private")
+        ]
+        
+        metodos_estudante = [
+            ("getMatricula", "String", [], "public"),
+            ("setMatricula", "void", [("matricula", "String")], "public"),
+            ("getCurso", "String", [], "public"),
+            ("setCurso", "void", [("curso", "String")], "public")
+        ]
+        
+        print("Criando classe Estudante...")
+        estudante = createClass("Estudante", "", atributos_estudante, metodos_estudante)
+        
+        # Criar herança
+        if estudante:
+            print("Criando herança...")
+            createGeneralization(estudante, pessoa)
+    
+    print("Script concluído")
+
